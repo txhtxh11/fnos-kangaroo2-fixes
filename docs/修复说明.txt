@@ -1,0 +1,110 @@
+========================================
+飞牛系统内置电池 UPS 识别修复说明（Kangaroo 二代）
+========================================
+修复日期：2026-10-12
+修复状态：已成功（冷启动验证通过，飞牛 UPS 页面已识别）
+
+一、问题根因
+----------
+设备内置电池（Intel SR Real Battery，挂载于 I2C4 总线的 PNP0C0A:01/BATC）
+在飞牛系统（内核 6.18.18.c1126-trim）下无法被识别为 UPS，原因在固件 DSDT：
+
+1. 电池设备 \_SB.PCI0.I2C4.BATC 的 _STA 方法内部访问了 GenericSerialBus
+   区域 DVEC，但启动早期该区域没有 OperationRegion handler，导致
+   ACPI Error: No handler for Region [DVEC] -> _STA 执行中止 (AE_NOT_EXIST)，
+   电池被判定为不存在（status=0）。
+2. 固件 DSDT 的 _STA 还带有 OSID/BDID 操作系统版本门槛，同样会导致返回 0。
+
+二、修复方案
+----------
+用 DSDT 补丁 + initrd override 机制替换固件 DSDT：
+
+1. 反编译固件 DSDT -> 修改 I2C4.BATC._STA 强制返回 0x1F（存在且启用），
+   同时清除因删代码产生的死代码（CRS4/CRS5）并修复 WIDR 错误。
+2. 将补丁表 OEM Revision 从 0x00000003 提升到 0x00000004 —— 这是内核
+   执行"物理表替换"的必要条件（签名+OEMID+OEM Table ID 匹配且修订更新）。
+   内核文档原文：匹配平台表（签名/OEMID/OEM Table ID 相似）且 OEM Revision
+   更新时，平台表才会被升级替换；否则仅追加（对 DSDT 即忽略）。
+3. 表填充到与原表等长 104691 字节（表头 length + checksum 修正），
+   以未压缩 cpio 打包为 /boot/acpi_override.cpio（内含
+   kernel/firmware/acpi/DSDT.aml），在 GRUB initrd 行拼接加载：
+   initrd /boot/acpi_override.cpio /boot/initrd.img-6.18.18.c1126-trim
+
+三、验证结果（成功）
+------------------
+dmesg:
+  ACPI: DSDT 0x000000007B0FE000 Physical table override, new table: ...
+  ACPI: DSDT 0x... 0198F3 (v02 FXN PC FOXCONN  00000004 INTL 20200925)
+  ACPI: battery: Slot [BATC] (battery present)
+系统:
+  /sys/class/power_supply/BATC 存在
+  /sys/bus/acpi/devices/PNP0C0A:01/status = 31 (0x1F)
+  upower 显示 battery_BATC（Intel SR Real Battery，8.14 Wh，满电）
+电池错误（DVEC no handler / _STA abort）已全部消失。
+
+四、本目录文件清单（全部修复所需文件）
+----------------------------------
+1. 修复说明.txt             - 本说明（含重做/回滚步骤）
+2. dsdt.patched.dsl         - 补丁源码（DefinitionBlock OEM Revision = 4，
+                              可直接编译，含 _STA 补丁/死代码清除/WIDR 修复）
+3. dsdt.override.aml        - 最终注入表（104691 字节，checksum 正确，
+                              可直接用于打包部署，无需重新编译）
+4. acpi_override.cpio.20261012 - 修复当日在设备 /boot 生效的 override 存档
+                              （未压缩 newc，内含 kernel/firmware/acpi/DSDT.aml）
+5. dsdt.orig.dat            - 原始固件 DSDT（104691 字节，供对照/重新打补丁基础）
+6. 重启修复说明-reboot_pci.txt - 关联修复：飞牛页面重启卡死修复（reboot=pci）
+
+设备端当前生效状态：
+  /boot/acpi_override.cpio（105472 字节）
+  /boot/grub/grub.cfg 第 85 行（initrd 拼接）
+
+五、如果重装飞牛系统后要重做（步骤）
+--------------------------------
+前提：装有 iasl（或 apt install acpica-tools）、cpio。
+
+1) 提取当前固件 DSDT（新系统的）：
+   cat /sys/firmware/acpi/tables/DSDT > dsdt.dat
+   iasl -d dsdt.dat
+
+2) 修改 dsdt.dsl：找到 I2C4.BATC 的 _STA 方法，替换方法体为：
+   Method (_STA, 0, NotSerialized) { Return (0x1F) }
+   （注意：若原 _STA 有 OSID 门槛/访问 GenericSerialBus 的逻辑，直接整体替换）
+
+3) 确认/修改表头 DefinitionBlock 的 OEM Revision，使其大于固件当前值
+   （固件为 3，本方案用 4；若新系统固件已升级，改更大的值）。
+   DefinitionBlock ("", "DSDT", 2, "FXN PC", "FOXCONN ", 0x00000004)
+
+4) 编译并填充到与原 DSDT 等长：
+   iasl -sa dsdt.dsl
+   （若新系统固件 DSDT 长度变化，用 python 填充到 cat dsdt.dat | wc -c 的长度，
+   修正表头 length 字段 offset 4-7、checksum offset 9 使 sum%256=0）
+
+5) 打包未压缩 cpio：
+   mkdir -p /tmp/override/kernel/firmware/acpi
+   cp dsdt.aml /tmp/override/kernel/firmware/acpi/DSDT.aml
+   cd /tmp/override && find . -print | cpio -o -H newc > /boot/acpi_override.cpio
+
+6) 改 GRUB：编辑 /boot/grub/grub.cfg（或对应配置生成器），
+   在 FNOS 主菜单的 linux 行之后把 initrd 行改为：
+   initrd /boot/acpi_override.cpio /boot/initrd.img-<当前内核版本>
+   （若内核更新，换成新 initrd 文件名）
+
+7) 冷启动验证：
+   dmesg | grep 'ACPI: DSDT'     # 应看到 Physical table override
+   ls /sys/class/power_supply/   # 应出现 BATC
+   upower -e                     # 应出现 battery_BATC
+
+六、回滚方法
+-----------
+把 grub.cfg 恢复为不含 acpi_override.cpio 的原始内容（删除 initrd 行里的
+/boot/acpi_override.cpio），删除 /boot/acpi_override.cpio，冷启动即恢复
+原状（数据无损）。本目录 dsdt.orig.dat 为原始表对照。
+
+七、备注
+--------
+- 本机 PNP0C0A:00(I2C1)/PNP0C0A:02(I2C7) status 仍为 0，属于占位/别名
+  设备，真电池只有 I2C4/BATC 一颗，已识别即可满足飞牛 UPS 功能。
+- SSH 软重启（reboot 命令）在本机不可靠，验证需长按电源键冷启动。
+- 本修复不修改任何系统数据，仅注入 ACPI 表，卸载方式见"六、回滚方法"。
+- 内核升级后：initrd 文件名可能变化，需更新 grub 拼接并冷启动验证
+  dmesg 是否仍有 Physical table override。
