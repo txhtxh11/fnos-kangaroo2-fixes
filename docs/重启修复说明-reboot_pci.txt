@@ -1,0 +1,31 @@
+========================================
+飞牛系统重启卡住修复说明（reboot=pci）
+========================================
+
+【问题背景】
+设备：Foxconn Kangaroo（Intel Atom x5-Z8500，Cherry Trail 平台）
+现象：点页面重启后卡在重启界面，电源灯常亮，需长按电源键强制关机
+原因：内核执行 ACPI 重启时被设备固件缺陷卡住（Cherry Trail 平台已知兼容问题）
+修复日期：2026-10-12（已生效，本次重启约 1 分钟完成）
+
+【重要】重新安装飞牛系统后，本参数会丢失，需重新执行以下修复：
+
+sudo cp /etc/default/grub /etc/default/grub.bak && \
+sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 reboot=pci"/' /etc/default/grub && \
+sudo update-grub && \
+echo "修复完成，重启后生效"
+
+【验证】
+cat /proc/cmdline   # 输出中应包含 reboot=pci
+
+【备用方案】如果 reboot=pci 仍卡住，可改试以下其一：
+  reboot=efi   -> 用 EFI 方式重启
+  reboot=acpi  -> 用 ACPI 方式重启
+  替换命令中的 reboot=pci 后重新执行上面三步即可。
+
+【撤销】
+sudo cp /etc/default/grub.bak /etc/default/grub && sudo update-grub
+
+【说明】
+- 此参数只改变系统重启方式，不影响其他功能
+- 换用非 Cherry Trail/Atom 平台设备时无需此参数
