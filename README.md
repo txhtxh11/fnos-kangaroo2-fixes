@@ -2,22 +2,48 @@
 
 适用于 **Foxconn Kangaroo（Intel Atom x5-Z8500 / Cherry Trail 平台）** 上运行的飞牛 OS。
 
-两个问题是**独立**的，可以分开修，也可以一起修。**但一起修时有顺序要求**（见下）。
+两个问题是**独立**的。可以分开修，也可以一个包装完 —— **二合一版在安装向导里就能分别勾选**。
 
 ---
 
-## 包含内容
+## 两种用法，按需选
+
+### 方式一：二合一（推荐，省事）
+
+- **技能**：`skills/fnos-kangaroo2-fixes/`
+- **安装包**：`packages/fn-kangaroo2-fix-1.0.0.fpk`
+
+安装向导里有两个下拉：
+- **① 修复「点重启卡在重启界面」** → 做 / 跳过
+- **② 修复「不识别内置电池为 UPS」** → 做 / 跳过
+
+两个都选"做"也不会冲突 —— 应用会**自动按正确顺序**执行（先重启、后电池）。
+
+### 方式二：独立包（想单独控制时）
+
+| 修复 | 技能 | 安装包 |
+|---|---|---|
+| 重启卡死 | `skills/fnos-reboot-pci/` | `packages/fn-reboot-pci-1.0.0.fpk` |
+| 电池 UPS | `skills/fnos-acpi-ups-battery/` | `packages/fn-ups-acpi-1.0.0.fpk` |
+
+⚠️ 用**独立包**两个都装时，**必须先装/启动重启修复，再装/启动电池修复**（见下）。
+
+---
+
+## 目录结构
 
 ```
 kangaroo二代飞牛重启及ups识别修复/
-├── README.md                      ← 本文件
-├── skills/                        ← 给 AI Agent 用的技能（OpenClaw 格式）
-│   ├── fnos-reboot-pci/SKILL.md         （重启卡死修复）
-│   └── fnos-acpi-ups-battery/SKILL.md   （电池 UPS 识别修复）
-├── packages/                      ← 飞牛手动安装包（应用中心 → 手动安装）
-│   ├── fn-reboot-pci-1.0.0.fpk          （重启卡死修复）
-│   └── fn-ups-acpi-1.0.0.fpk            （电池 UPS 识别修复）
-└── docs/                          ← 原始修复记录（含完整原理与重做步骤）
+├── README.md
+├── skills/
+│   ├── fnos-kangaroo2-fixes/SKILL.md    ← 二合一（推荐）
+│   ├── fnos-reboot-pci/SKILL.md         ← 独立：重启
+│   └── fnos-acpi-ups-battery/SKILL.md   ← 独立：电池
+├── packages/
+│   ├── fn-kangaroo2-fix-1.0.0.fpk       ← 二合一（推荐）
+│   ├── fn-reboot-pci-1.0.0.fpk          ← 独立：重启
+│   └── fn-ups-acpi-1.0.0.fpk            ← 独立：电池
+└── docs/
     ├── 修复说明.txt
     └── 重启修复说明-reboot_pci.txt
 ```
@@ -26,56 +52,39 @@ kangaroo二代飞牛重启及ups识别修复/
 
 ## 问题一：点重启后卡在重启界面
 
-**症状**：飞牛页面点「重启」后卡住，电源灯常亮，需长按电源键强制关机。
-
-**原因**：Cherry Trail 平台已知固件缺陷，内核执行 ACPI 重启时被卡住。
-
-**修复**：给内核加 `reboot=pci` 参数。
-
-- 手动：见 `skills/fnos-reboot-pci/SKILL.md`
-- 安装包：`packages/fn-reboot-pci-1.0.0.fpk`
-
----
+**症状**：飞牛页面点「重启」后卡住，电源灯常亮，需长按电源键。
+**原因**：Cherry Trail 平台已知固件缺陷。
+**修复**：内核参数加 `reboot=pci`。
 
 ## 问题二：不识别内置电池为 UPS
 
-**症状**：飞牛 UPS 页面空白；`/sys/class/power_supply/` 里没有 `BATC`；`upower -e` 无电池。
-
-**原因**：固件 DSDT 中电池设备 `I2C4.BATC` 的 `_STA` 方法在启动早期访问了
-GenericSerialBus 区域 `DVEC`（此时无 handler）而中止，电池被判定为"不存在"。
-
+**症状**：UPS 页面空白；`/sys/class/power_supply/` 无 `BATC`；`upower -e` 无电池。
+**原因**：固件 DSDT 中 `I2C4.BATC` 的 `_STA` 启动早期访问 GenericSerialBus 区域 `DVEC`
+（此时无 handler）而中止，电池被判为"不存在"。
 **修复**：用打补丁的 DSDT 表通过 initrd override 替换固件表。
 
-- 手动：见 `skills/fnos-acpi-ups-battery/SKILL.md`
-- 安装包：`packages/fn-ups-acpi-1.0.0.fpk`
+---
+
+## ⚠️ 顺序要求（仅当用「独立包」两个都做时）
+
+```
+1. 先：reboot=pci + update-grub      ← update-grub 会重新生成 /boot/grub/grub.cfg
+2. 后：把 acpi_override 插入 initrd 行
+```
+
+**反序**：`update-grub` 会覆盖掉 override 行 → 电池修复白做
+（症状：`dmesg | grep 'Physical table override'` 无输出）。
+
+> 用**二合一包**则无需操心 —— 它内部已固定顺序。
 
 ---
 
-## ⚠️ 两个一起修复时的顺序（重要）
+## 安装步骤（二合一包）
 
-**必须先做「重启修复」，再做「电池修复」**：
-
-```
-1. 先：reboot=pci + update-grub        ← update-grub 会重新生成 /boot/grub/grub.cfg
-2. 后：把 acpi_override 插入 initrd 行  ← 必须在 update-grub 之后
-```
-
-**反序的后果**：`update-grub` 会把 grub.cfg 整个重新生成，**覆盖掉 ACPI override 那行**，
-导致电池修复白做（表现为：`dmesg | grep 'Physical table override'` 没有输出）。
-
-**如果中途又跑了 `update-grub`**：需要重新执行一次电池修复（安装包点一次「启动」，
-或手动重做 skill 里的"步骤 7"）。
-
----
-
-## 安装步骤（用安装包）
-
-1. 把两个 `.fpk` 传到飞牛（文件管理 → 上传）
-2. 飞牛 **应用中心 → 手动安装** → 先选 `fn-reboot-pci-1.0.0.fpk`
-   - 安装向导里选 `pci`，装完点【启动】
-3. 再装 `fn-ups-acpi-1.0.0.fpk`
-   - 向导里「自动接入 GRUB」选**是**，装完点【启动】
-4. **长按电源键冷启动**（不要用 SSH 的 reboot 命令验证，本机不可靠）
+1. 把 `fn-kangaroo2-fix-1.0.0.fpk` 传到飞牛（文件管理 → 上传）
+2. 飞牛 **应用中心 → 手动安装** → 选它
+3. 向导里按需勾选两个修复 → 装完点【启动】
+4. **长按电源键冷启动**（不要用 SSH `reboot` 验证，本机不可靠）
 
 ## 验证（冷启动后）
 
@@ -84,24 +93,19 @@ GenericSerialBus 区域 `DVEC`（此时无 handler）而中止，电池被判定
 cat /proc/cmdline | grep -o reboot=pci
 
 # 电池修复
-dmesg | grep 'ACPI: DSDT'                    # 应看到 Physical table override
+dmesg | grep 'ACPI: DSDT'                    # 应见 Physical table override
 ls /sys/class/power_supply/                  # 应出现 BATC
 upower -e                                    # 应出现 battery_BATC
 
-# 应用自带状态
-/var/apps/fn-reboot-pci/cmd/main status
-/var/apps/fn-ups-acpi/cmd/main status
+# 应用状态
+/var/apps/fn-kangaroo2-fix/cmd/main status
 ```
 
 ## 撤销
 
 ```bash
-# 重启修复
-/var/apps/fn-reboot-pci/cmd/main rollback
-
-# 电池修复
-/var/apps/fn-ups-acpi/cmd/main rollback
-# 然后删除 /boot/acpi_override.cpio 并冷启动
+/var/apps/fn-kangaroo2-fix/cmd/main rollback
+# 独立包则分别执行各自的 rollback
 ```
 
-两个修复都**不修改系统数据**，仅改动启动参数与注入 ACPI 表，可安全回滚。
+两个修复都**不改系统数据**，仅改动启动参数与注入 ACPI 表，可安全回滚。
